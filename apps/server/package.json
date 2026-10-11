@@ -1,0 +1,20 @@
+{
+  "name": "@ordinace/server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch --env-file-if-exists=.env src/server.ts",
+    "typecheck": "tsc",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@ordinace/shared": "*",
+    "fastify": "^5.12.5",
+    "openai": "^7.32.0",
+    "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^6.0.3"
+  }
+}

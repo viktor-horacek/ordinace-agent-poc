@@ -1,0 +1,61 @@
+.chat {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 32px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.chat h1 {
+  font-size: 1.4rem;
+  margin: 0;
+}
+
+.chat textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  padding: 8px;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.thinking {
+  color: #666;
+  background: #f4f4f4;
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+.thinking pre {
+  white-space: pre-wrap;
+  font-size: 0.85rem;
+  margin: 8px 0 0;
+}
+
+.answer {
+  white-space: pre-wrap;
+  min-height: 3em;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.muted {
+  color: #999;
+}
+
+.error {
+  color: #b00020;
+}
+
+.usage {
+  color: #666;
+  font-size: 0.85rem;
+  margin: 0;
+}

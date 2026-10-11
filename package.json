@@ -1,0 +1,19 @@
+{
+  "name": "ordinace-poc",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@11.9.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo dev",
+    "typecheck": "turbo typecheck",
+    "test": "turbo test",
+    "build": "turbo build"
+  },
+  "devDependencies": {
+    "turbo": "^2.11.7"
+  }
+}
