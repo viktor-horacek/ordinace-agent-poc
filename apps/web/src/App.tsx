@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import './App.css'
+import { EventSourceParserStream } from 'eventsource-parser/stream'
 
 // Hotový chat shell. Nové je jen napojení na server:
 // krok 5 = čtení streamu z POST /api/chat, krok 6 = stav přes eventy PocEvent (@ordinace/shared).
@@ -21,16 +22,56 @@ export default function App() {
   const [prompt, setPrompt] = useState('')
   const [chat, setChat] = useState<ChatState>(initial)
   const streaming = chat.status === 'streaming'
+  const abortRef = useRef<AbortController | null>(null)
 
   async function send() {
     setChat({ ...initial, status: 'streaming' })
-    // TODO krok 5: fetch('/api/chat', { method: 'POST', body: { prompt }, signal }) a čtení streamu.
-    // Do té doby UI jen ukáže, co by odešlo:
-    setChat({ ...initial, text: `(zatím bez serveru) ${prompt}`, status: 'done' })
+    const abort = new AbortController()
+    abortRef.current = abort
+
+    try {
+      // EventSource umí jen GET, proto fetch a ruční čtení těla odpovědi
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt }),
+        signal: abort.signal,
+      })
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
+
+      // bajty → text (TextDecoderStream nerozbije znak s diakritikou rozdělený mezi dva kusy)
+      // → hotové SSE eventy (eventsource-parser skládá rozdělené eventy, řeší komentáře, \r\n, id)
+      const reader = res.body
+        .pipeThrough(new TextDecoderStream())
+        .pipeThrough(new EventSourceParserStream())
+        .getReader()
+      for (;;) {
+        const { value, done } = await reader.read()
+        if (done) break
+        // TODO krok 6: místo ručního rozbalování typ PocEvent ze shared a reducer
+        const payload = JSON.parse(value.data)
+        if (value.event === 'text') setChat((prev) => ({ ...prev, text: prev.text + payload.text }))
+        else if (value.event === 'usage')
+          setChat((prev) => ({
+            ...prev,
+            usage: {
+              input: payload.usage.prompt_tokens,
+              output: payload.usage.completion_tokens,
+              reasoning: payload.usage.completion_tokens_details?.reasoning_tokens,
+            },
+          }))
+        else if (value.event === 'done') setChat((prev) => ({ ...prev, status: 'done' }))
+        else if (value.event === 'error') setChat((prev) => ({ ...prev, status: 'error', error: payload.message }))
+      }
+    } catch (error) {
+      if (abort.signal.aborted) return // zastavil uživatel, stav už nastavil stop()
+      setChat((prev) => ({ ...prev, status: 'error', error: String(error) }))
+    }
   }
 
   function stop() {
-    // TODO krok 5: AbortController.abort(); server pak ukončí volání modelu (krok 4)
+    // zrušení fetch zavře spojení; server to pozná a zruší volání modelu (krok 4.4)
+    abortRef.current?.abort()
     setChat((prev) => ({ ...prev, status: 'idle' }))
   }
 
