@@ -8,6 +8,7 @@ export type Usage = { input: number; output: number; reasoning?: number }
 
 /** Discriminated union: podle pole `type` TypeScript ví, jaká další pole event má. */
 export type PocEvent =
+  | { type: 'thinking'; text: string } // přemýšlení modelu (reasoning), v UI odděleně od odpovědi
   | { type: 'text'; text: string }
   | { type: 'usage'; usage: Usage }
   | { type: 'done' }

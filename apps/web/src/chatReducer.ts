@@ -20,6 +20,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return { ...initialChat, status: 'streaming' }
     case 'stop':
       return { ...state, status: 'idle' }
+    case 'thinking':
+      return { ...state, thinking: state.thinking + action.text }
     case 'text':
       return { ...state, text: state.text + action.text }
     case 'usage':

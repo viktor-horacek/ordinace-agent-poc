@@ -5,9 +5,26 @@ import type { ServerResponse } from 'node:http';
 import type { ChatCompletionChunk } from 'openai/resources/chat/completions';
 import type { PocEvent } from '@ordinace/shared';
 
+// OpenRouter přidává do delta přemýšlení modelu; typy openai SDK o těchto polích nevědí.
+// Podle dokumentace chodí ve streamu reasoning_details, některé modely posílají i prostý reasoning.
+type OrDelta = ChatCompletionChunk.Choice.Delta & {
+  reasoning?: string | null;
+  reasoning_details?: { type: string; text?: string; summary?: string }[];
+};
+
+function reasoningText(delta: OrDelta | undefined): string {
+  if (!delta) return '';
+  if (delta.reasoning) return delta.reasoning;
+  // reasoning.text nese text přemýšlení, reasoning.summary jen shrnutí (třeba u modelů OpenAI)
+  return (delta.reasoning_details ?? []).map((d) => d.text ?? d.summary ?? '').join('');
+}
+
 export function chunkToEvents(chunk: ChatCompletionChunk): PocEvent[] {
   const events: PocEvent[] = [];
-  const text = chunk.choices[0]?.delta.content;
+  const delta = chunk.choices[0]?.delta as OrDelta | undefined;
+  const thinking = reasoningText(delta);
+  if (thinking) events.push({ type: 'thinking', text: thinking });
+  const text = delta?.content;
   if (text) events.push({ type: 'text', text });
   if (chunk.usage) {
     events.push({
