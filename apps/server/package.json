@@ -8,9 +8,9 @@
     "test": "node --test"
   },
   "dependencies": {
+    "@openrouter/sdk": "^1.4.25",
     "@ordinace/shared": "*",
     "fastify": "^5.12.5",
-    "openai": "^7.32.0",
     "zod": "^4.6.6"
   },
   "devDependencies": {

@@ -1,5 +1,5 @@
 import Fastify from 'fastify'
-import { client, model } from './model.ts';
+import { complete, streamChat } from './model.ts';
 import { z } from 'zod';
 import type { PocEvent } from '@ordinace/shared';
 import { chunkToEvents, toSse } from './events.ts';
@@ -9,14 +9,12 @@ const app = Fastify({ logger: true })
 
 app.get('/api/health', async () => ({ ok: true }))
 
-// Krok 2: POST /api/ask, první volání modelu přes OpenRouter (klient modelu do src/model.ts).
+// Krok 2: POST /api/ask, první volání modelu přes OpenRouter (klient modelu v src/model.ts).
 app.post<{ Body: { prompt: string } }>('/api/ask', async (req, reply) => {
     const { prompt } = req.body;
 
-
     try {
-        const { choices, usage } = await client.chat.completions.create({
-            model: model!,
+        const { choices, usage } = await complete({
             messages: [
                 {
                     role: 'system',
@@ -29,12 +27,12 @@ app.post<{ Body: { prompt: string } }>('/api/ask', async (req, reply) => {
             ],
         });
 
-        return { message: choices[0].message.content, usage };
+        return { message: choices[0]?.message.content, usage };
 
     } catch (error) {
         console.error(error)
         reply.status(502);
-        return { error: 'Nepodařilo se získat odpověď od modelu', status: 502 }
+        return { error: 'Nepodařilo se získat odpověď od modelu' }
     }
 });
 
@@ -52,8 +50,7 @@ app.post<{ Body: { text: string } }>('/api/triage', async (req, reply) => {
     const { text } = req.body;
 
     try {
-        const { choices, usage } = await client.chat.completions.create({
-            model: model!,
+        const { choices, usage } = await complete({
             messages: [
                 {
                     role: 'system',
@@ -64,17 +61,15 @@ app.post<{ Body: { text: string } }>('/api/triage', async (req, reply) => {
                     content: text,
                 },
             ],
-            response_format: { type: 'json_schema', json_schema: { name: 'triage', strict: true, schema: z.toJSONSchema(Triage) } }
+            responseFormat: { type: 'json_schema', jsonSchema: { name: 'triage', strict: true, schema: z.toJSONSchema(Triage) } }
         });
 
-
-        const content = choices[0].message.content;
-        if (!content) {
+        const content = choices[0]?.message.content;
+        if (typeof content !== 'string' || !content) {
             throw new Error('No content returned from model');
         }
         const parsedContent = JSON.parse(content);
-        const validatedContent = Triage.parse(parsedContent); 
-    
+        const validatedContent = Triage.parse(parsedContent);
 
         return { message: validatedContent, usage };
 
@@ -120,15 +115,12 @@ app.post<{ Body: { prompt?: string } | undefined }>('/api/chat', async (req, rep
         // FAKE_MODEL=1: pevný stream bez volání OpenRouteru (fakeModel.ts); jinak skutečný model
         const stream = fakeModelEnabled
             ? fakeStream(abort.signal)
-            : await client.chat.completions.create({
-                model: model!,
-                stream: true,
-                stream_options: { include_usage: true },
+            : await streamChat({
                 messages: [
                     { role: 'system', content: 'Jsi recepční Ordinace Lipová. Odpovídej česky a stručně.' },
                     { role: 'user', content: prompt },
                 ],
-            }, { signal: abort.signal }); // druhý argument = volby požadavku, signal ho umí zrušit i uprostřed streamu
+            }, abort.signal); // signal zruší požadavek i uprostřed streamu
 
         for await (const chunk of stream) {
             for (const event of chunkToEvents(chunk)) send(event);

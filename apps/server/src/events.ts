@@ -1,38 +1,40 @@
 // Krok 6: překlad z formátu providera na náš protokol PocEvent a zápis do SSE.
-// Jediné místo, které zná tvar chunku z OpenAI SDK. Prohlížeč zná jen PocEvent,
-// takže výměna providera (nebo přidání reasoning a nástrojů v krocích 7–9) mění jen tenhle soubor.
+// Jediné místo, které zná tvar chunku od OpenRouteru. Prohlížeč zná jen PocEvent,
+// takže výměna providera (nebo přidání nástrojů v krocích 8–9) mění jen tenhle soubor.
 import type { ServerResponse } from 'node:http';
-import type { ChatCompletionChunk } from 'openai/resources/chat/completions';
+import type { ChatStreamChunk, ReasoningDetailUnion } from '@openrouter/sdk/models';
 import type { PocEvent } from '@ordinace/shared';
 
-// OpenRouter přidává do delta přemýšlení modelu; typy openai SDK o těchto polích nevědí.
-// Podle dokumentace chodí ve streamu reasoning_details, některé modely posílají i prostý reasoning.
-type OrDelta = ChatCompletionChunk.Choice.Delta & {
-  reasoning?: string | null;
-  reasoning_details?: { type: string; text?: string; summary?: string }[];
-};
-
-function reasoningText(delta: OrDelta | undefined): string {
-  if (!delta) return '';
-  if (delta.reasoning) return delta.reasoning;
-  // reasoning.text nese text přemýšlení, reasoning.summary jen shrnutí (třeba u modelů OpenAI)
-  return (delta.reasoning_details ?? []).map((d) => d.text ?? d.summary ?? '').join('');
+// Přemýšlení chodí buď jako prostý text v `reasoning`, nebo strukturovaně v `reasoningDetails`
+// (discriminated union podle `type`). Šifrované přemýšlení a neznámé typy se nezobrazují.
+function detailText(detail: ReasoningDetailUnion): string {
+  switch (detail.type) {
+    case 'reasoning.text':
+      return detail.text ?? '';
+    case 'reasoning.summary':
+      return detail.summary; // jen shrnutí, ne surové přemýšlení (třeba u modelů OpenAI)
+    default:
+      return '';
+  }
 }
 
-export function chunkToEvents(chunk: ChatCompletionChunk): PocEvent[] {
+export function chunkToEvents(chunk: ChatStreamChunk): PocEvent[] {
   const events: PocEvent[] = [];
-  const delta = chunk.choices[0]?.delta as OrDelta | undefined;
-  const thinking = reasoningText(delta);
+  // chyba může přijít i uprostřed streamu jako pole chunku, ne jako HTTP status
+  if (chunk.error) events.push({ type: 'error', message: chunk.error.message });
+
+  const delta = chunk.choices[0]?.delta;
+  const thinking = delta?.reasoning || (delta?.reasoningDetails ?? []).map(detailText).join('');
   if (thinking) events.push({ type: 'thinking', text: thinking });
-  const text = delta?.content;
-  if (text) events.push({ type: 'text', text });
+  if (delta?.content) events.push({ type: 'text', text: delta.content });
+
   if (chunk.usage) {
     events.push({
       type: 'usage',
       usage: {
-        input: chunk.usage.prompt_tokens,
-        output: chunk.usage.completion_tokens,
-        reasoning: chunk.usage.completion_tokens_details?.reasoning_tokens,
+        input: chunk.usage.promptTokens,
+        output: chunk.usage.completionTokens,
+        reasoning: chunk.usage.completionTokensDetails?.reasoningTokens ?? undefined,
       },
     });
   }
