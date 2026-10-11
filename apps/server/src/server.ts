@@ -102,6 +102,17 @@ app.post<{ Body: { prompt?: string } | undefined }>('/api/chat', async (req, rep
     const send = (event: string, data: unknown) =>
         reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
+    // 4.4: když klient odejde (zavře tab, Ctrl+C v curlu), zrušíme i volání modelu, ať neplatíme tokeny,
+    // které nikdo nečte. Poslouchat 'close' na reply.raw, ne na req.raw: req 'close' přijde hned po přečtení
+    // těla požadavku. writableEnded = už jsme odpověď sami ukončili, to není odpojení klienta.
+    const abort = new AbortController();
+    reply.raw.on('close', () => {
+        if (!reply.raw.writableEnded) {
+            req.log.info('klient se odpojil, abort volání modelu');
+            abort.abort();
+        }
+    });
+
     try {
         const stream = await client.chat.completions.create({
             model: model!,
@@ -111,7 +122,7 @@ app.post<{ Body: { prompt?: string } | undefined }>('/api/chat', async (req, rep
                 { role: 'system', content: 'Jsi recepční Ordinace Lipová. Odpovídej česky a stručně.' },
                 { role: 'user', content: prompt },
             ],
-        });
+        }, { signal: abort.signal }); // druhý argument = volby požadavku, signal ho umí zrušit i uprostřed streamu
 
         for await (const chunk of stream) {
             const text = chunk.choices[0]?.delta.content;
@@ -120,6 +131,8 @@ app.post<{ Body: { prompt?: string } | undefined }>('/api/chat', async (req, rep
         }
         send('done', { type: 'done' });
     } catch (error) {
+        // zrušení po odpojení není chyba a psát už není komu
+        if (abort.signal.aborted) return;
         console.error(error);
         // klientovi obecná zpráva, detail jen do logu
         send('error', { type: 'error', message: 'Nepodařilo se získat odpověď od modelu' });
