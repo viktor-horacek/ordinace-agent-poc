@@ -83,5 +83,19 @@ app.post<{ Body: { text: string } }>('/api/triage', async (req, reply) => {
 });
 
 // Krok 4: POST /api/chat, stream z modelu přeposílaný jako SSE.
+// 4.2: zatím bez modelu, jen jeden pevný event, ať je vidět formát SSE.
+app.post('/api/chat', async (_req, reply) => {
+    // hijack: Fastify odpověď neodešle sám, píšeme ji ručně přes reply.raw (Node http.ServerResponse)
+    reply.hijack();
+    reply.raw.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+    });
+
+    // jeden SSE event = řádky "pole: hodnota" a na konci prázdný řádek (\n\n)
+    reply.raw.write(`event: text\ndata: ${JSON.stringify({ type: 'text', text: 'Dobrý den' })}\n\n`);
+    reply.raw.end();
+});
 
 await app.listen({ port: 3000 })
