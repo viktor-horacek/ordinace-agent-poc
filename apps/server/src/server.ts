@@ -83,8 +83,12 @@ app.post<{ Body: { text: string } }>('/api/triage', async (req, reply) => {
 });
 
 // Krok 4: POST /api/chat, stream z modelu přeposílaný jako SSE.
-// 4.2: zatím bez modelu, jen jeden pevný event, ať je vidět formát SSE.
-app.post('/api/chat', async (_req, reply) => {
+// 4.3: kousky textu z modelu přeposíláme jako SSE eventy, na konci usage a done.
+// 4.5: chyba uprostřed streamu jde jako event error (status 200 už odešel, jiný poslat nejde).
+app.post<{ Body: { prompt?: string } | undefined }>('/api/chat', async (req, reply) => {
+    // bez těla použijeme pevný dotaz, ať jde testovat curlem bez uvozovek
+    const prompt = req.body?.prompt ?? 'Popiš ve třech větách, jak se objednat na odběr krve.';
+
     // hijack: Fastify odpověď neodešle sám, píšeme ji ručně přes reply.raw (Node http.ServerResponse)
     reply.hijack();
     reply.raw.writeHead(200, {
@@ -93,9 +97,35 @@ app.post('/api/chat', async (_req, reply) => {
         connection: 'keep-alive',
     });
 
-    // jeden SSE event = řádky "pole: hodnota" a na konci prázdný řádek (\n\n)
-    reply.raw.write(`event: text\ndata: ${JSON.stringify({ type: 'text', text: 'Dobrý den' })}\n\n`);
-    reply.raw.end();
+    // jeden SSE event = řádky "pole: hodnota" a na konci prázdný řádek (\n\n);
+    // JSON.stringify zajistí, že nový řádek v textu nerozbije formát (z \n se stane \\n)
+    const send = (event: string, data: unknown) =>
+        reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+
+    try {
+        const stream = await client.chat.completions.create({
+            model: model!,
+            stream: true,
+            stream_options: { include_usage: true },
+            messages: [
+                { role: 'system', content: 'Jsi recepční Ordinace Lipová. Odpovídej česky a stručně.' },
+                { role: 'user', content: prompt },
+            ],
+        });
+
+        for await (const chunk of stream) {
+            const text = chunk.choices[0]?.delta.content;
+            if (text) send('text', { type: 'text', text });
+            if (chunk.usage) send('usage', { type: 'usage', usage: chunk.usage });
+        }
+        send('done', { type: 'done' });
+    } catch (error) {
+        console.error(error);
+        // klientovi obecná zpráva, detail jen do logu
+        send('error', { type: 'error', message: 'Nepodařilo se získat odpověď od modelu' });
+    } finally {
+        reply.raw.end();
+    }
 });
 
 await app.listen({ port: 3000 })
