@@ -3,6 +3,7 @@ import { client, model } from './model.ts';
 import { z } from 'zod';
 import type { PocEvent } from '@ordinace/shared';
 import { chunkToEvents, toSse } from './events.ts';
+import { fakeModelEnabled, fakeStream } from './fakeModel.ts';
 
 const app = Fastify({ logger: true })
 
@@ -116,15 +117,18 @@ app.post<{ Body: { prompt?: string } | undefined }>('/api/chat', async (req, rep
     });
 
     try {
-        const stream = await client.chat.completions.create({
-            model: model!,
-            stream: true,
-            stream_options: { include_usage: true },
-            messages: [
-                { role: 'system', content: 'Jsi recepční Ordinace Lipová. Odpovídej česky a stručně.' },
-                { role: 'user', content: prompt },
-            ],
-        }, { signal: abort.signal }); // druhý argument = volby požadavku, signal ho umí zrušit i uprostřed streamu
+        // FAKE_MODEL=1: pevný stream bez volání OpenRouteru (fakeModel.ts); jinak skutečný model
+        const stream = fakeModelEnabled
+            ? fakeStream(abort.signal)
+            : await client.chat.completions.create({
+                model: model!,
+                stream: true,
+                stream_options: { include_usage: true },
+                messages: [
+                    { role: 'system', content: 'Jsi recepční Ordinace Lipová. Odpovídej česky a stručně.' },
+                    { role: 'user', content: prompt },
+                ],
+            }, { signal: abort.signal }); // druhý argument = volby požadavku, signal ho umí zrušit i uprostřed streamu
 
         for await (const chunk of stream) {
             for (const event of chunkToEvents(chunk)) send(event);
