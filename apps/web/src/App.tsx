@@ -1,31 +1,19 @@
-import { useRef, useState } from 'react'
+import { useReducer, useRef, useState } from 'react'
 import './App.css'
 import { EventSourceParserStream } from 'eventsource-parser/stream'
+import type { PocEvent } from '@ordinace/shared'
+import { chatReducer, initialChat } from './chatReducer.ts'
 
-// Hotový chat shell. Nové je jen napojení na server:
-// krok 5 = čtení streamu z POST /api/chat, krok 6 = stav přes eventy PocEvent (@ordinace/shared).
-
-type Usage = { input: number; output: number; reasoning?: number }
-type Status = 'idle' | 'streaming' | 'done' | 'error'
-
-type ChatState = {
-  text: string
-  thinking: string
-  usage: Usage | null
-  status: Status
-  error: string | null
-}
-
-const initial: ChatState = { text: '', thinking: '', usage: null, status: 'idle', error: null }
+// Chat shell: krok 5 = čtení streamu z POST /api/chat, krok 6 = stav přes eventy PocEvent (@ordinace/shared).
 
 export default function App() {
   const [prompt, setPrompt] = useState('')
-  const [chat, setChat] = useState<ChatState>(initial)
+  const [chat, dispatch] = useReducer(chatReducer, initialChat)
   const streaming = chat.status === 'streaming'
   const abortRef = useRef<AbortController | null>(null)
 
   async function send() {
-    setChat({ ...initial, status: 'streaming' })
+    dispatch({ type: 'start' })
     const abort = new AbortController()
     abortRef.current = abort
 
@@ -48,31 +36,20 @@ export default function App() {
       for (;;) {
         const { value, done } = await reader.read()
         if (done) break
-        // TODO krok 6: místo ručního rozbalování typ PocEvent ze shared a reducer
-        const payload = JSON.parse(value.data)
-        if (value.event === 'text') setChat((prev) => ({ ...prev, text: prev.text + payload.text }))
-        else if (value.event === 'usage')
-          setChat((prev) => ({
-            ...prev,
-            usage: {
-              input: payload.usage.prompt_tokens,
-              output: payload.usage.completion_tokens,
-              reasoning: payload.usage.completion_tokens_details?.reasoning_tokens,
-            },
-          }))
-        else if (value.event === 'done') setChat((prev) => ({ ...prev, status: 'done' }))
-        else if (value.event === 'error') setChat((prev) => ({ ...prev, status: 'error', error: payload.message }))
+        // data jsou JSON s tvarem PocEvent; za běhu to neověřujeme (věříme vlastnímu serveru),
+        // pro jistotu by šel přidat zod i tady
+        dispatch(JSON.parse(value.data) as PocEvent)
       }
     } catch (error) {
       if (abort.signal.aborted) return // zastavil uživatel, stav už nastavil stop()
-      setChat((prev) => ({ ...prev, status: 'error', error: String(error) }))
+      dispatch({ type: 'error', message: String(error) })
     }
   }
 
   function stop() {
     // zrušení fetch zavře spojení; server to pozná a zruší volání modelu (krok 4.4)
     abortRef.current?.abort()
-    setChat((prev) => ({ ...prev, status: 'idle' }))
+    dispatch({ type: 'stop' })
   }
 
   return (

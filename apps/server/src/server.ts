@@ -1,6 +1,8 @@
 import Fastify from 'fastify'
 import { client, model } from './model.ts';
 import { z } from 'zod';
+import type { PocEvent } from '@ordinace/shared';
+import { chunkToEvents, toSse } from './events.ts';
 
 const app = Fastify({ logger: true })
 
@@ -98,9 +100,9 @@ app.post<{ Body: { prompt?: string } | undefined }>('/api/chat', async (req, rep
     });
 
     // jeden SSE event = řádky "pole: hodnota" a na konci prázdný řádek (\n\n);
-    // JSON.stringify zajistí, že nový řádek v textu nerozbije formát (z \n se stane \\n)
-    const send = (event: string, data: unknown) =>
-        reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    // JSON.stringify zajistí, že nový řádek v textu nerozbije formát (z \n se stane \\n).
+    // Krok 6: posílat jde jen PocEvent, jiný tvar typecheck odmítne.
+    const send = (event: PocEvent) => toSse(reply.raw, event);
 
     // 4.4: když klient odejde (zavře tab, Ctrl+C v curlu), zrušíme i volání modelu, ať neplatíme tokeny,
     // které nikdo nečte. Poslouchat 'close' na reply.raw, ne na req.raw: req 'close' přijde hned po přečtení
@@ -125,17 +127,15 @@ app.post<{ Body: { prompt?: string } | undefined }>('/api/chat', async (req, rep
         }, { signal: abort.signal }); // druhý argument = volby požadavku, signal ho umí zrušit i uprostřed streamu
 
         for await (const chunk of stream) {
-            const text = chunk.choices[0]?.delta.content;
-            if (text) send('text', { type: 'text', text });
-            if (chunk.usage) send('usage', { type: 'usage', usage: chunk.usage });
+            for (const event of chunkToEvents(chunk)) send(event);
         }
-        send('done', { type: 'done' });
+        send({ type: 'done' });
     } catch (error) {
         // zrušení po odpojení není chyba a psát už není komu
         if (abort.signal.aborted) return;
         console.error(error);
         // klientovi obecná zpráva, detail jen do logu
-        send('error', { type: 'error', message: 'Nepodařilo se získat odpověď od modelu' });
+        send({ type: 'error', message: 'Nepodařilo se získat odpověď od modelu' });
     } finally {
         reply.raw.end();
     }
