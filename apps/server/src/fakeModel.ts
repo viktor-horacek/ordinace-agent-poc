@@ -6,7 +6,7 @@
 import type {
   ChatAssistantMessage, ChatFinishReasonEnum, ChatRequest, ChatResult, ChatStreamChunk, ChatStreamDelta, ChatUsage,
 } from '@openrouter/sdk/models';
-import { addDays, todayIso } from './calendar.ts';
+import { addDays, nextWeekday, todayIso } from './calendar.ts';
 
 export const fakeModelEnabled = process.env.FAKE_MODEL === '1';
 
@@ -59,26 +59,52 @@ export async function* fakeStream(signal?: AbortSignal): AsyncGenerator<ChatStre
 // Pravidla místo modelu: ptá se na termín → chci find_free_slots; přišel výsledek nástroje → odpověď z něj;
 // jinak obyčejný text. Datum bere z dotazu (YYYY-MM-DD), jinak zítřek, takže jde vyzkoušet i neplatné datum
 // („Máte volno 2026-13-45?“) nebo datum mimo kalendář.
+// Krok 9: zmínka „paní/pan X“ → napřed get_patient, po jeho výsledku v dalším tahu find_free_slots (dva tahy s nástrojem).
 export async function fakeComplete(req: Pick<ChatRequest, 'messages'>): Promise<ChatResult> {
   const last = req.messages.at(-1);
   const text = typeof last?.content === 'string' ? last.content : '';
+  // dotaz pacienta: poslední zpráva user (ve druhém a dalším tahu je na konci výsledek nástroje)
+  const user = req.messages.findLast((m) => m.role === 'user');
+  const question = typeof user?.content === 'string' ? user.content : '';
 
-  // druhé volání: poslední zpráva je výsledek nástroje
+  // po get_patient chceme termíny; podle id volání poznáme, na který nástroj výsledek odpovídá
+  if (last?.role === 'tool' && last.toolCallId === PATIENT_CALL_ID) {
+    return toolCall(SLOTS_CALL_ID, 'find_free_slots', { date: dateFrom(question) });
+  }
+  // výsledek find_free_slots: odpověď z něj
   if (last?.role === 'tool') {
     return result({ role: 'assistant', content: answerFromTool(text) }, 'stop');
   }
 
-  // první volání: dotaz na termín → místo textu tool_calls, content je null
+  // „paní Dvořákovou“ → { name: 'Dvořáková' }: 4. pád na 1. pád jen pro koncovku -ovou, na fake to stačí
+  const name = text.match(/(?:paní|pan|pana)\s+(\p{Lu}\p{Ll}+)/u)?.[1];
+  if (name) {
+    return toolCall(PATIENT_CALL_ID, 'get_patient', { name: name.replace(/ovou$/, 'ová') });
+  }
+
+  // první tah: dotaz na termín → místo textu tool_calls, content je null
   if (/termín|volno/i.test(text)) {
-    const date = text.match(/\d{4}-\d{2}-\d{2}/)?.[0] ?? addDays(todayIso(), 1);
-    return result({
-      role: 'assistant',
-      content: null,
-      toolCalls: [{ id: 'call_fake_1', type: 'function', function: { name: 'find_free_slots', arguments: JSON.stringify({ date }) } }],
-    }, 'tool_calls');
+    return toolCall(SLOTS_CALL_ID, 'find_free_slots', { date: dateFrom(text) });
   }
 
   return result({ role: 'assistant', content: 'Na to vám nejlépe odpoví sestra, zavolejte prosím v ordinačních hodinách.' }, 'stop');
+}
+
+const PATIENT_CALL_ID = 'call_fake_patient';
+const SLOTS_CALL_ID = 'call_fake_slots';
+
+// datum z dotazu: YYYY-MM-DD, „úterý“ = nejbližší úterý, jinak zítřek
+function dateFrom(text: string): string {
+  const today = todayIso();
+  return text.match(/\d{4}-\d{2}-\d{2}/)?.[0] ?? (/úterý/i.test(text) ? nextWeekday(today, 2) : addDays(today, 1));
+}
+
+function toolCall(id: string, name: string, args: object): ChatResult {
+  return result({
+    role: 'assistant',
+    content: null,
+    toolCalls: [{ id, type: 'function', function: { name, arguments: JSON.stringify(args) } }],
+  }, 'tool_calls');
 }
 
 // výsledek nástroje je JSON pole časů, nebo text chyby z runTool

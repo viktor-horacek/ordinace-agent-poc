@@ -6,7 +6,7 @@ import { chunkToEvents, toSse } from './events.ts';
 import { fakeComplete, fakeModelEnabled, fakeStream } from './fakeModel.ts';
 import type { ChatMessages } from '@openrouter/sdk/models';
 import { todayIso } from './calendar.ts';
-import { runTool, tools } from './tools.ts';
+import { runAgent, TurnLimitError } from './agent.ts';
 
 const app = Fastify({ logger: true })
 
@@ -140,12 +140,11 @@ app.post<{ Body: { prompt?: string } | undefined }>('/api/chat', async (req, rep
     }
 });
 
-// Krok 8: POST /api/agent, první nástroj a jedna otočka, bez streamu (tvar zpráv je vidět celý najednou).
-// volání s tools → model chce nástroj (tool_calls) → vykonáme → výsledky jako zprávy role tool → druhé volání → text.
-// Žádná smyčka: když model po výsledku chce další nástroj, tady končíme (smyčka je krok 9).
+// Krok 8: POST /api/agent, nástroje bez streamu (tvar zpráv je vidět celý najednou).
+// Krok 9: místo jedné otočky agentní smyčka (agent.ts): tahy, dokud model chce nástroje, nejvýš MAX_TAHU.
 app.post<{ Body: { prompt?: string } | undefined }>('/api/agent', async (req, reply) => {
-    const prompt = req.body?.prompt ?? 'Máte zítra ráno volno?';
-    // FAKE_MODEL=1: pravidla místo modelu (fakeModel.ts), celé kolo s nástrojem jde projet bez sítě
+    const prompt = req.body?.prompt ?? 'Najdi paní Dvořákovou a navrhni jí termín v úterý ráno.';
+    // FAKE_MODEL=1: pravidla místo modelu (fakeModel.ts), celý běh s nástroji jde projet bez sítě
     const callModel = fakeModelEnabled ? fakeComplete : complete;
 
     // „zítra“ model sám nezná, dnešní datum mu musíme říct
@@ -154,42 +153,20 @@ app.post<{ Body: { prompt?: string } | undefined }>('/api/agent', async (req, re
         {
             role: 'system',
             content: `Jsi recepční Ordinace Lipová. Odpovídej česky a stručně. Dnes je ${today}. `
-                + 'Volné termíny zjišťuj nástrojem find_free_slots, nikdy si je nevymýšlej.',
+                + 'Volné termíny zjišťuj nástrojem find_free_slots, pacienty nástrojem get_patient, nikdy si nic nevymýšlej.',
         },
         { role: 'user', content: prompt },
     ];
 
     try {
-        const first = await callModel({ messages, tools });
-        const assistant = first.choices[0]?.message;
-        if (!assistant) throw new Error('Model nevrátil žádnou odpověď');
-        const toolCalls = assistant.toolCalls ?? [];
-
-        // model odpověděl rovnou textem, nástroj nepotřeboval
-        if (toolCalls.length === 0) {
-            return { message: assistant.content, toolCalls: [], usage: [first.usage] };
-        }
-        req.log.info({ toolCalls }, 'model chce nástroje');
-
-        // do historie nejdřív zpráva asistenta s tool_calls tak, jak přišla; bez ní provider výsledek s tool_call_id odmítne
-        messages.push(assistant);
-        // tool_calls je pole: každé volání dostane vlastní výsledek se svým toolCallId
-        const results = toolCalls.map((call) => ({ call, result: runTool(call) }));
-        for (const { call, result } of results) {
-            messages.push({ role: 'tool', toolCallId: call.id, content: result });
-        }
-
-        // tools posíláme i ve druhém volání: historie obsahuje tool_calls a bez definic nástrojů ji provider může odmítnout
-        const second = await callModel({ messages, tools });
-        return {
-            message: second.choices[0]?.message.content,
-            toolCalls: results.map(({ call, result }) => ({ name: call.function.name, args: call.function.arguments, result })),
-            usage: [first.usage, second.usage], // dvě volání = dvakrát placené tokeny
-        };
+        const run = await runAgent(callModel, messages);
+        req.log.info({ turns: run.turns, toolCalls: run.toolCalls.map((c) => c.name) }, 'běh agenta skončil');
+        return run;
     } catch (error) {
         console.error(error);
         reply.status(502);
-        return { error: 'Nepodařilo se získat odpověď od modelu' };
+        // limit tahů klientovi řekneme rovnou, ostatní chyby jen obecně (detail je v logu)
+        return { error: error instanceof TurnLimitError ? error.message : 'Nepodařilo se získat odpověď od modelu' };
     }
 });
 

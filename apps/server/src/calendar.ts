@@ -30,6 +30,12 @@ export function addDays(date: string, n: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+/** Nejbližší daný den v týdnu po dni `from` (2 = úterý). Z úterka vrátí úterý za týden. */
+export function nextWeekday(from: string, weekday: number): string {
+  const current = new Date(`${from}T00:00:00Z`).getUTCDay();
+  return addDays(from, (weekday - current + 7) % 7 || 7);
+}
+
 /**
  * Volné začátky slotů pro jeden den, např. ['08:40', '09:00', …]. O víkendu prázdné pole.
  * Datum mimo kalendář je výjimka: o tom, jak ji ukázat modelu, rozhoduje volající (tools.ts).
