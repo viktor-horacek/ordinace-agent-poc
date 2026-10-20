@@ -3,8 +3,10 @@
 // Volej model; když chce nástroje, vykonej je, přidej výsledky a volej znovu; když odpoví textem, konec.
 // Model přichází parametrem (callModel), ne importem z model.ts: server dá complete() nebo fakeComplete(),
 // test skriptovaný model, a smyčka jde otestovat bez sítě.
+// Krok 9.5: volitelný onEvent hlásí průběh (volání nástrojů) ven, server ho posílá jako SSE do UI.
 import type { ChatMessages, ChatRequest, ChatResult, ChatUsage } from '@openrouter/sdk/models';
-import { runTool, tools } from './tools.ts';
+import type { PocEvent } from '@ordinace/shared';
+import { prepareTool, tools } from './tools.ts';
 
 /** Pojistka proti modelu, který se zacyklí a pálí tokeny (rozhodnutí 2: 12 tahů). */
 export const MAX_TAHU = 12;
@@ -27,9 +29,13 @@ export class TurnLimitError extends Error {
 
 /**
  * Jeden běh agenta. Historii doplňuje přímo do `messages` (zprávy asistenta a výsledky nástrojů).
- * Chyba nástroje běh neukončí: runTool ji vrátí jako text a model na ni v dalším tahu zareaguje.
+ * Chyba nástroje běh neukončí: prepareTool ji vrátí jako text a model na ni v dalším tahu zareaguje.
  */
-export async function runAgent(callModel: CallModel, messages: ChatMessages[]): Promise<AgentRun> {
+export async function runAgent(
+    callModel: CallModel,
+    messages: ChatMessages[],
+    onEvent: (event: PocEvent) => void = () => {}, // test ho vynechá, server posílá eventy klientovi
+): Promise<AgentRun> {
     const run: AgentRun = { message: null, toolCalls: [], usage: [], turns: 0 };
 
     for (let turn = 1; turn <= MAX_TAHU; turn++) {
@@ -40,6 +46,8 @@ export async function runAgent(callModel: CallModel, messages: ChatMessages[]): 
         const assistant = res.choices[0]?.message;
         if (!assistant) throw new Error('Model nevrátil žádnou odpověď');
         messages.push(assistant);
+        // přemýšlení přijde až s celou odpovědí tahu, ne po kouscích (smyčka nestreamuje)
+        if (assistant.reasoning) onEvent({ type: 'thinking', text: assistant.reasoning });
 
         const calls = assistant.toolCalls ?? [];
         // model odpověděl textem: běh končí
@@ -52,7 +60,10 @@ export async function runAgent(callModel: CallModel, messages: ChatMessages[]): 
         if (turn === MAX_TAHU) break;
 
         for (const call of calls) {
-            const result = runTool(call);
+            // argumenty se parsují jednou: z toho popisek pro UI i vykonání (nebo chyba pro model)
+            const prepared = prepareTool(call);
+            onEvent({ type: 'tool_call', name: call.function.name, label: prepared.label });
+            const result = prepared.ok ? prepared.run() : prepared.error;
             messages.push({ role: 'tool', toolCallId: call.id, content: result });
             run.toolCalls.push({ name: call.function.name, args: call.function.arguments, result });
         }

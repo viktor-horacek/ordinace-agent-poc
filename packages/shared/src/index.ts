@@ -10,6 +10,9 @@ export type Usage = { input: number; output: number; reasoning?: number }
 export type PocEvent =
   | { type: 'thinking'; text: string } // přemýšlení modelu (reasoning), v UI odděleně od odpovědi
   | { type: 'text'; text: string }
+  // Krok 9.5: agent volá nástroj; label je hotový řádek pro člověka („hledám pacienta Dvořáková…“),
+  // skládá ho server z ověřených argumentů, web ho jen vykreslí
+  | { type: 'tool_call'; name: string; label: string }
   | { type: 'usage'; usage: Usage }
   | { type: 'done' }
   | { type: 'error'; message: string }

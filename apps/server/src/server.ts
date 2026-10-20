@@ -1,4 +1,4 @@
-import Fastify from 'fastify'
+import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify'
 import { complete, streamChat } from './model.ts';
 import { z } from 'zod';
 import type { PocEvent } from '@ordinace/shared';
@@ -83,13 +83,14 @@ app.post<{ Body: { text: string } }>('/api/triage', async (req, reply) => {
     }
 });
 
-// Krok 4: POST /api/chat, stream z modelu přeposílaný jako SSE.
-// 4.3: kousky textu z modelu přeposíláme jako SSE eventy, na konci usage a done.
-// 4.5: chyba uprostřed streamu jde jako event error (status 200 už odešel, jiný poslat nejde).
-app.post<{ Body: { prompt?: string } | undefined }>('/api/chat', async (req, reply) => {
-    // bez těla použijeme pevný dotaz, ať jde testovat curlem bez uvozovek
-    const prompt = req.body?.prompt ?? 'Popiš ve třech větách, jak se objednat na odběr krve.';
-
+// Krok 9.5: kostra SSE odpovědi vytažená z /api/chat, ať ji sdílí i /api/agent.
+// `work` jen posílá eventy přes send; hlavičky, done, chyby a odpojení klienta řeší tahle funkce.
+// 4.3: na konci done. 4.5: chyba uprostřed streamu jde jako event error (status 200 už odešel, jiný poslat nejde).
+async function sse(
+    req: FastifyRequest,
+    reply: FastifyReply,
+    work: (send: (event: PocEvent) => void, signal: AbortSignal) => Promise<void>,
+) {
     // hijack: Fastify odpověď neodešle sám, píšeme ji ručně přes reply.raw (Node http.ServerResponse)
     reply.hijack();
     reply.raw.writeHead(200, {
@@ -115,34 +116,46 @@ app.post<{ Body: { prompt?: string } | undefined }>('/api/chat', async (req, rep
     });
 
     try {
-        // FAKE_MODEL=1: pevný stream bez volání OpenRouteru (fakeModel.ts); jinak skutečný model
-        const stream = fakeModelEnabled
-            ? fakeStream(abort.signal)
-            : await streamChat({
-                messages: [
-                    { role: 'system', content: 'Jsi recepční Ordinace Lipová. Odpovídej česky a stručně.' },
-                    { role: 'user', content: prompt },
-                ],
-            }, abort.signal); // signal zruší požadavek i uprostřed streamu
-
-        for await (const chunk of stream) {
-            for (const event of chunkToEvents(chunk)) send(event);
-        }
+        await work(send, abort.signal);
         send({ type: 'done' });
     } catch (error) {
         // zrušení po odpojení není chyba a psát už není komu
         if (abort.signal.aborted) return;
         console.error(error);
-        // klientovi obecná zpráva, detail jen do logu
-        send({ type: 'error', message: 'Nepodařilo se získat odpověď od modelu' });
+        // klientovi obecná zpráva, detail jen do logu; limit tahů agenta řekneme rovnou
+        send({ type: 'error', message: error instanceof TurnLimitError ? error.message : 'Nepodařilo se získat odpověď od modelu' });
     } finally {
         reply.raw.end();
     }
+}
+
+// Krok 4: POST /api/chat, stream z modelu přeposílaný jako SSE.
+app.post<{ Body: { prompt?: string } | undefined }>('/api/chat', (req, reply) => {
+    // bez těla použijeme pevný dotaz, ať jde testovat curlem bez uvozovek
+    const prompt = req.body?.prompt ?? 'Popiš ve třech větách, jak se objednat na odběr krve.';
+
+    return sse(req, reply, async (send, signal) => {
+        // FAKE_MODEL=1: pevný stream bez volání OpenRouteru (fakeModel.ts); jinak skutečný model
+        const stream = fakeModelEnabled
+            ? fakeStream(signal)
+            : await streamChat({
+                messages: [
+                    { role: 'system', content: 'Jsi recepční Ordinace Lipová. Odpovídej česky a stručně.' },
+                    { role: 'user', content: prompt },
+                ],
+            }, signal); // signal zruší požadavek i uprostřed streamu
+
+        for await (const chunk of stream) {
+            for (const event of chunkToEvents(chunk)) send(event);
+        }
+    });
 });
 
 // Krok 8: POST /api/agent, nástroje bez streamu (tvar zpráv je vidět celý najednou).
 // Krok 9: místo jedné otočky agentní smyčka (agent.ts): tahy, dokud model chce nástroje, nejvýš MAX_TAHU.
-app.post<{ Body: { prompt?: string } | undefined }>('/api/agent', async (req, reply) => {
+// Krok 9.5: místo JSONu SSE jako /api/chat: během běhu event tool_call za každý nástroj, na konci text a usage.
+// Jednotlivé tahy se nestreamují, odpověď přijde vcelku.
+app.post<{ Body: { prompt?: string } | undefined }>('/api/agent', (req, reply) => {
     const prompt = req.body?.prompt ?? 'Najdi paní Dvořákovou a navrhni jí termín v úterý ráno.';
     // FAKE_MODEL=1: pravidla místo modelu (fakeModel.ts), celý běh s nástroji jde projet bez sítě
     const callModel = fakeModelEnabled ? fakeComplete : complete;
@@ -158,16 +171,19 @@ app.post<{ Body: { prompt?: string } | undefined }>('/api/agent', async (req, re
         { role: 'user', content: prompt },
     ];
 
-    try {
-        const run = await runAgent(callModel, messages);
+    return sse(req, reply, async (send) => {
+        const run = await runAgent(callModel, messages, send);
         req.log.info({ turns: run.turns, toolCalls: run.toolCalls.map((c) => c.name) }, 'běh agenta skončil');
-        return run;
-    } catch (error) {
-        console.error(error);
-        reply.status(502);
-        // limit tahů klientovi řekneme rovnou, ostatní chyby jen obecně (detail je v logu)
-        return { error: error instanceof TurnLimitError ? error.message : 'Nepodařilo se získat odpověď od modelu' };
-    }
+        if (run.message) send({ type: 'text', text: run.message });
+        // každý tah se platí zvlášť, klientovi pošleme součet za celý běh
+        send({
+            type: 'usage',
+            usage: {
+                input: run.usage.reduce((sum, u) => sum + u.promptTokens, 0),
+                output: run.usage.reduce((sum, u) => sum + u.completionTokens, 0),
+            },
+        });
+    });
 });
 
 await app.listen({ port: 3000 })

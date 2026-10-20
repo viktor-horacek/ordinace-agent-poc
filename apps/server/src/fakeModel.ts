@@ -107,7 +107,7 @@ function toolCall(id: string, name: string, args: object): ChatResult {
   }, 'tool_calls');
 }
 
-// výsledek nástroje je JSON pole časů, nebo text chyby z runTool
+// výsledek nástroje je JSON pole časů, nebo text chyby z tools.ts
 function answerFromTool(content: string): string {
   try {
     const slots: string[] = JSON.parse(content);

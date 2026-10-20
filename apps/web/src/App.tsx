@@ -5,9 +5,12 @@ import type { PocEvent } from '@ordinace/shared'
 import { chatReducer, initialChat } from './chatReducer.ts'
 
 // Chat shell: krok 5 = čtení streamu z POST /api/chat, krok 6 = stav přes eventy PocEvent (@ordinace/shared).
+// Krok 9.5: přepínač agenta; s ním chat čte stejný stream eventů z POST /api/agent a ukazuje volané nástroje
+// (popisky skládá server, web je jen vypíše).
 
 export default function App() {
   const [prompt, setPrompt] = useState('')
+  const [agent, setAgent] = useState(true)
   const [chat, dispatch] = useReducer(chatReducer, initialChat)
   const streaming = chat.status === 'streaming'
   const abortRef = useRef<AbortController | null>(null)
@@ -19,7 +22,7 @@ export default function App() {
 
     try {
       // EventSource umí jen GET, proto fetch a ruční čtení těla odpovědi
-      const res = await fetch('/api/chat', {
+      const res = await fetch(agent ? '/api/agent' : '/api/chat', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ prompt }),
@@ -75,6 +78,10 @@ export default function App() {
           <button type="button" onClick={stop} disabled={!streaming}>
             Zastavit
           </button>
+          <label>
+            <input type="checkbox" checked={agent} onChange={(e) => setAgent(e.target.checked)} disabled={streaming} />
+            Agent s nástroji
+          </label>
         </div>
       </form>
 
@@ -83,6 +90,14 @@ export default function App() {
           <summary>Přemýšlí…</summary>
           <pre>{chat.thinking}</pre>
         </details>
+      )}
+
+      {chat.toolCalls.length > 0 && (
+        <ul className="tools">
+          {chat.toolCalls.map((label, i) => (
+            <li key={i}>{label}</li>
+          ))}
+        </ul>
       )}
 
       <section className="answer" aria-live="polite">
