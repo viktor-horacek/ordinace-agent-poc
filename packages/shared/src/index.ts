@@ -13,6 +13,9 @@ export type PocEvent =
   // Krok 9.5: agent volá nástroj; label je hotový řádek pro člověka („hledám pacienta Dvořáková…“),
   // skládá ho server z ověřených argumentů, web ho jen vykreslí
   | { type: 'tool_call'; name: string; label: string }
+  // Krok 10: zápis čeká na člověka a běh skončil. Rozhodnutí: POST /api/agent/:runId/approve nebo /decline.
+  // label je otázka pro kartu („objednat Jana Dvořáková na 27. 10. v 9:40“), callId volání nástroje
+  | { type: 'approval_required'; runId: string; callId: string; label: string }
   | { type: 'usage'; usage: Usage }
   | { type: 'done' }
   | { type: 'error'; message: string }

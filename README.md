@@ -22,18 +22,35 @@ a zvlášť ukazuje přemýšlení modelu. Všechna data jsou smyšlená.
   Během běhu server posílá event `tool_call` za každé volání nástroje s hotovým popiskem pro člověka (skládá ho
   z ověřených argumentů funkce u definice nástroje v `tools.ts`), na konci `text`, `usage` (součet za všechny
   tahy) a `done`. Jednotlivé tahy se nestreamují: odpověď a případné přemýšlení přijdou vcelku po každém tahu.
+- Zápis se schválením člověkem: třetí nástroj `book_appointment` (id pacienta, datum, čas) zapíše do smyšleného
+  kalendáře, slot pak není volný. Nástroj má v registru `effect: 'write'` (ostatní `'read'`) a takový smyčka sama
+  nespustí: běh skončí s čekajícím voláním, server ho uloží se stavem `awaiting_approval` a pošle event
+  `approval_required` (`runId`, popisek „objednat Jana Dvořáková na 27. 10. v 9:40“, id volání). Hranici drží
+  server, ne věta v promptu. Rozhodnutí je nový požadavek: `POST /api/agent/:runId/approve` zápis vykoná,
+  `/decline` ho nevykoná a modelu pošle jako výsledek nástroje „Uživatel zápis odmítl…“, takže model nabídne jiný
+  čas; obojí pak pokračuje smyčkou a odpovídá stejným SSE jako `/api/agent`. Přechod jde jen ze stavu
+  `awaiting_approval` a je synchronní (bez `await` mezi kontrolou a změnou stavu), takže druhé kliknutí dostane
+  `409` a nezapíše podruhé; neznámý běh `404`. Běhy i objednávky jsou jen v paměti procesu (`Map`), bez persistence:
+  restart serveru je smaže a hotové běhy se nemažou. Ve webu se u `approval_required` ukáže karta Schválit /
+  Zamítnout a odpověď z approve/decline se dočte do stejného chatu.
 - Chat ve webu má přepínač „Agent s nástroji“ (zapnutý jako výchozí). S ním čte `/api/agent` a nad odpovědí
   vypisuje popisky ze serveru, třeba „hledám pacienta Dvořáková…“ a „hledám volné termíny 27. 10.…“;
   bez něj čte `/api/chat`.
 - Testy smyčky (`npm test`, `node:test`, bez sítě): model je parametr smyčky, takže ho test nahradí skriptovaným
   modelem s předem danými odpověďmi. Ověřují dva nástroje za sebou, chybu nástroje jako výsledek, limit tahů
-  a průchod scénáře s falešným modelem včetně eventů `tool_call`.
+  a průchod scénáře s falešným modelem včetně eventů `tool_call`. Testy schvalování (`approval.test.ts`): zápis se
+  bez schválení nevykoná (slot v kalendáři zůstane volný), schválení zapíše, zamítnutí dostane model jako výsledek
+  nástroje, druhé rozhodnutí o stejném běhu je `409`.
+- Chyby od providera jdou do logu jen jako výtah (`describeError` v `apps/server/src/errors.ts`: jméno, zpráva,
+  status, text chyby od providera), bez hlaviček, cookies a API klíče, které chyby z SDK nesou s sebou.
 - Falešný model (`FAKE_MODEL=1`): pevný stream s přemýšlením a pravidla místo modelu pro `/api/agent`
   (dotaz na termín → `find_free_slots` → odpověď z výsledku; „paní Dvořákovou“ → `get_patient`, pak
-  `find_free_slots`), všechno bez volání API, na vývoj a testy.
+  `find_free_slots`; „Objednej paní Dvořákovou na úterý ráno“ → `get_patient`, `find_free_slots`, `book_appointment`
+  na první volný čas, po zamítnutí nabídne jiné časy, po schválení potvrdí), všechno bez volání API, na vývoj a testy.
 
 Zatím ne: průběžný text a přemýšlení uvnitř smyčky (stream tahů a skládání `tool_calls` po kouscích), zrušení běhu
-agenta při odpojení klienta, schvalování zápisů, observabilita, RAG.
+agenta při odpojení klienta, persistence běhů (teď jen paměť procesu) a jejich úklid, zrušení čekajícího běhu
+(kromě Zamítnout), observabilita, RAG.
 
 ## Spuštění
 
@@ -49,6 +66,10 @@ npm run dev                                      # = turbo dev: Vite na 5173 a F
 - `curl.exe -N -X POST http://localhost:5173/api/chat`: syrový SSE stream přes Vite proxy
 - `curl.exe -N -X POST http://localhost:5173/api/agent`: běh agenta s nástroji jako SSE (bez těla: „Najdi paní
   Dvořákovou a navrhni jí termín v úterý ráno.“); počet tahů a volané nástroje jsou i v logu serveru
+- schvalování curlem: `curl.exe -N -X POST http://localhost:5173/api/agent -H "content-type: application/json"
+  --data-binary "@body.json"` s `{"prompt":"Objednej paní Dvořákovou na úterý ráno"}` v `body.json` (diakritika
+  v souboru projde bez potíží s kódováním konzole), pak s `runId` z eventu `approval_required`
+  `curl.exe -N -X POST http://localhost:5173/api/agent/<runId>/approve` (nebo `/decline`); druhé volání vrátí `409`
 - `npm run typecheck`, `npm test`, `npm run build`: totéž přes turbo, výsledky se cachují
 
 ## Struktura
@@ -58,7 +79,8 @@ apps/web         React + Vite, proxy /api -> localhost:3000, stav chatu přes re
 apps/server      Fastify, Node 24 spouští .ts přímo (type stripping), node --watch
                  model.ts (klient @openrouter/sdk), events.ts (chunk providera -> eventy), fakeModel.ts
                  calendar.ts a patients.ts (smyšlená data), tools.ts (registr nástrojů: definice pro model, jedno ověření argumentů, popisek, vykonání),
-                 agent.ts (smyčka s limitem tahů) a agent.test.ts
+                 agent.ts (smyčka s limitem tahů, pauza na zápis), runs.ts (běhy v paměti, přechod stavu),
+                 agent.test.ts a approval.test.ts
 packages/shared  @ordinace/shared: kontrakt eventů mezi serverem a webem
 turbo.json       tasky dev, typecheck, test, build
 tsconfig.base.json  společné volby TypeScriptu, balíčky ho rozšiřují přes extends
@@ -85,5 +107,6 @@ celý diff kroku je v historii (`git log --oneline`, pak `git show <commit>`).
 | 8 | Nástroj `find_free_slots` nad smyšleným kalendářem, `/api/agent` s jednou otočkou | `tools.ts`, `calendar.ts`, `server.ts` |
 | 9 | Agentní smyčka s limitem tahů, nástroj `get_patient`, testy se skriptovaným modelem | `agent.ts`, `patients.ts`, `agent.test.ts` |
 | 9.5 | Event `tool_call` s popiskem od serveru, registr nástrojů, `/api/agent` přes SSE se společnou kostrou s `/api/chat`, řádky nástrojů v chatu | `shared/src/index.ts`, `tools.ts`, `agent.ts`, `server.ts`, `App.tsx` |
+| 10 | Zápis se schválením člověkem: `effect` v registru, nástroj `book_appointment`, běhy v paměti, `approval_required`, routy approve/decline s `409` při druhém rozhodnutí, karta Schválit / Zamítnout | `tools.ts`, `agent.ts`, `runs.ts`, `server.ts`, `approval.test.ts`, `App.tsx` |
 
 Soubory bez cesty jsou v `apps/server/src` nebo `apps/web/src`.

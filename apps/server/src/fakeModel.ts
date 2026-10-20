@@ -60,6 +60,8 @@ export async function* fakeStream(signal?: AbortSignal): AsyncGenerator<ChatStre
 // jinak obyčejný text. Datum bere z dotazu (YYYY-MM-DD), jinak zítřek, takže jde vyzkoušet i neplatné datum
 // („Máte volno 2026-13-45?“) nebo datum mimo kalendář.
 // Krok 9: zmínka „paní/pan X“ → napřed get_patient, po jeho výsledku v dalším tahu find_free_slots (dva tahy s nástrojem).
+// Krok 10: „Objednej …“ → po termínech book_appointment na první volný čas; po zamítnutí nabídne jiné časy,
+// po schválení potvrdí.
 export async function fakeComplete(req: Pick<ChatRequest, 'messages'>): Promise<ChatResult> {
   const last = req.messages.at(-1);
   const text = typeof last?.content === 'string' ? last.content : '';
@@ -70,6 +72,19 @@ export async function fakeComplete(req: Pick<ChatRequest, 'messages'>): Promise<
   // po get_patient chceme termíny; podle id volání poznáme, na který nástroj výsledek odpovídá
   if (last?.role === 'tool' && last.toolCallId === PATIENT_CALL_ID) {
     return toolCall(SLOTS_CALL_ID, 'find_free_slots', { date: dateFrom(question) });
+  }
+  // „Objednej …“: po termínech zápis prvního volného času (ten smyčka nespustí, čeká na schválení)
+  if (last?.role === 'tool' && last.toolCallId === SLOTS_CALL_ID && /objednej/i.test(question)) {
+    const patients: { id: string }[] = parseOr(toolContent(req.messages, PATIENT_CALL_ID), []);
+    const patientId = patients[0]?.id;
+    const slots: string[] = parseOr(text, []);
+    if (patientId && slots[0]) {
+      return toolCall(BOOK_CALL_ID, 'book_appointment', { patientId, date: dateFrom(question), time: slots[0] });
+    }
+  }
+  // výsledek book_appointment: zamítnuto → jiné časy téhož dne, jinak potvrzení nebo chyba
+  if (last?.role === 'tool' && last.toolCallId === BOOK_CALL_ID) {
+    return result({ role: 'assistant', content: answerFromBooking(text, parseOr(toolContent(req.messages, SLOTS_CALL_ID), [])) }, 'stop');
   }
   // výsledek find_free_slots: odpověď z něj
   if (last?.role === 'tool') {
@@ -92,6 +107,35 @@ export async function fakeComplete(req: Pick<ChatRequest, 'messages'>): Promise<
 
 const PATIENT_CALL_ID = 'call_fake_patient';
 const SLOTS_CALL_ID = 'call_fake_slots';
+const BOOK_CALL_ID = 'call_fake_book';
+
+// text výsledku nástroje podle id volání
+function toolContent(messages: ChatRequest['messages'], id: string): string {
+  const content = messages.find((m) => m.role === 'tool' && m.toolCallId === id)?.content;
+  return typeof content === 'string' ? content : '';
+}
+
+// fake věří tvaru výsledků vlastních nástrojů; text chyby místo JSONu dá fallback
+function parseOr<T>(json: string, fallback: T): T {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return fallback;
+  }
+}
+
+function answerFromBooking(content: string, slots: string[]): string {
+  if (/odmítl/.test(content)) {
+    const other = slots.slice(1, 3);
+    return other.length ? `Rozumím, jiné volné časy téhož dne: ${other.join(', ')}. Který vám vyhovuje?` : 'Ten den už jiný volný čas nemáme.';
+  }
+  try {
+    const booking: { patient: string; date: string; time: string } = JSON.parse(content);
+    return `Hotovo, ${booking.patient} je objednaná na ${booking.date} v ${booking.time}.`;
+  } catch {
+    return `Objednat se nepodařilo (${content}).`;
+  }
+}
 
 // datum z dotazu: YYYY-MM-DD, „úterý“ = nejbližší úterý, jinak zítřek
 function dateFrom(text: string): string {

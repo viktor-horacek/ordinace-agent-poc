@@ -3,13 +3,18 @@
 // co se opravdu vykoná, rozhoduje tenhle soubor.
 // Krok 9.5: nástroj je jedna položka registru (popis pro model, schéma, popisek pro člověka, vykonání).
 // Nový nástroj = změna jen tady; web zobrazí hotový popisek ze serveru.
+// Krok 10: nástroj nese effect. 'write' něco mění a smyčka ho bez schválení člověkem nespustí (agent.ts).
 import type { ChatFunctionTool, ChatToolCall } from '@openrouter/sdk/models';
 import { z } from 'zod';
-import { findFreeSlots } from './calendar.ts';
-import { findPatients } from './patients.ts';
+import { bookAppointment, findFreeSlots } from './calendar.ts';
+import { findPatients, getPatient } from './patients.ts';
+
+/** read = jen čte, smyčka ho spustí sama; write = mění data, čeká na schválení člověkem. */
+export type ToolEffect = 'read' | 'write';
 
 type ToolDef<S extends z.ZodType> = {
     name: string;
+    effect: ToolEffect;
     /** Čte model a podle něj se rozhoduje, tak je psaný pro něj. */
     description: string;
     /** Z něj JSON Schema pro model a stejným schématem ověříme, co model pošle. */
@@ -27,7 +32,7 @@ type ToolDef<S extends z.ZodType> = {
  * `run()` nebo `error` je výsledek pro model (zpráva role `tool`).
  */
 export type PreparedCall =
-    | { ok: true; label: string; run: () => string }
+    | { ok: true; label: string; effect: ToolEffect; run: () => string }
     | { ok: false; label: string; error: string };
 
 /** Nástroj v registru. Typ argumentů z něj nevidět: zůstal v closure uvnitř defineTool. */
@@ -69,6 +74,7 @@ function defineTool<S extends z.ZodType>(def: ToolDef<S>): RegisteredTool {
             return {
                 ok: true,
                 label: def.label(args),
+                effect: def.effect,
                 run: () => {
                     try {
                         // content zprávy je řetězec, proto JSON.stringify
@@ -89,9 +95,13 @@ function shortDate(iso: string): string {
     return `${Number(day)}. ${Number(month)}.`;
 }
 
+// 09:40 → 9:40
+const shortTime = (time: string) => time.replace(/^0/, '');
+
 const registry: RegisteredTool[] = [
     defineTool({
         name: 'find_free_slots',
+        effect: 'read',
         description: 'Volné termíny ordinace pro jeden den (začátky slotů po 20 minutách, 8:00–16:00). '
             + 'Použij, když se pacient ptá na volný termín. Datum ve formátu YYYY-MM-DD, kalendář sahá 14 dní od dneška. '
             + 'Prázdné pole znamená, že ten den není volno (o víkendu je zavřeno).',
@@ -105,6 +115,7 @@ const registry: RegisteredTool[] = [
     // Krok 9.1: druhý nástroj
     defineTool({
         name: 'get_patient',
+        effect: 'read',
         description: 'Najde pacienta ordinace podle jména nebo příjmení. Vrací pole { id, name, birthYear }. '
             + 'Prázdné pole = pacient u nás není; víc položek = zeptej se, o koho jde (třeba podle roku narození).',
         args: z.object({
@@ -113,6 +124,27 @@ const registry: RegisteredTool[] = [
         invalidArgs: 'očekávám { "name": "příjmení" } aspoň se dvěma znaky',
         label: ({ name }) => `hledám pacienta ${name}…`,
         run: ({ name }) => findPatients(name),
+    }),
+    // Krok 10: první zápis. Popisek je otázka pro sestru na kartě se schválením.
+    defineTool({
+        name: 'book_appointment',
+        effect: 'write',
+        description: 'Objedná pacienta na volný termín. Id pacienta ber z get_patient, čas z find_free_slots. '
+            + 'Zápis před provedením schvaluje sestra; když ho odmítne, nabídni pacientovi jiný volný čas.',
+        args: z.object({
+            patientId: z.string().describe('Id pacienta z get_patient, např. p1'),
+            date: z.iso.date().describe('Den ve formátu YYYY-MM-DD'),
+            time: z.string().regex(/^\d{2}:\d{2}$/).describe('Začátek slotu HH:MM z find_free_slots, např. 09:40'),
+        }),
+        invalidArgs: 'očekávám { "patientId": "p1", "date": "YYYY-MM-DD", "time": "HH:MM" }',
+        label: ({ patientId, date, time }) =>
+            `objednat ${getPatient(patientId)?.name ?? patientId} na ${shortDate(date)} v ${shortTime(time)}`,
+        run: ({ patientId, date, time }) => {
+            const patient = getPatient(patientId);
+            if (!patient) throw new Error(`pacient ${patientId} neexistuje`);
+            bookAppointment(patientId, date, time);
+            return { booked: true, patient: patient.name, date, time };
+        },
     }),
 ];
 

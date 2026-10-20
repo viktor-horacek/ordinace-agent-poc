@@ -51,6 +51,17 @@
   padding-left: 20px;
 }
 
+.approval {
+  border: 1px solid #e0b400;
+  background: #fff8db;
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+.approval p {
+  margin: 0;
+}
+
 .answer {
   white-space: pre-wrap;
   min-height: 3em;

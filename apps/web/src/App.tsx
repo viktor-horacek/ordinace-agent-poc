@@ -7,6 +7,8 @@ import { chatReducer, initialChat } from './chatReducer.ts'
 // Chat shell: krok 5 = čtení streamu z POST /api/chat, krok 6 = stav přes eventy PocEvent (@ordinace/shared).
 // Krok 9.5: přepínač agenta; s ním chat čte stejný stream eventů z POST /api/agent a ukazuje volané nástroje
 // (popisky skládá server, web je jen vypíše).
+// Krok 10: u approval_required karta Schválit / Zamítnout; kliknutí pošle POST na approve/decline
+// a odpověď (zase SSE) čte stejná funkce stream() do stejného chatu.
 
 export default function App() {
   const [prompt, setPrompt] = useState('')
@@ -17,15 +19,27 @@ export default function App() {
 
   async function send() {
     dispatch({ type: 'start' })
+    await stream(agent ? '/api/agent' : '/api/chat', { prompt })
+  }
+
+  async function decide(decision: 'approve' | 'decline') {
+    if (!chat.approval) return
+    const url = `/api/agent/${chat.approval.runId}/${decision}`
+    dispatch({ type: 'resume', decision })
+    await stream(url)
+  }
+
+  // POST a čtení SSE eventů do reduceru; approve/decline nemají tělo
+  async function stream(url: string, body?: object) {
     const abort = new AbortController()
     abortRef.current = abort
 
     try {
       // EventSource umí jen GET, proto fetch a ruční čtení těla odpovědi
-      const res = await fetch(agent ? '/api/agent' : '/api/chat', {
+      // (bez těla ani content-type: Fastify by prázdné JSON tělo odmítl)
+      const res = await fetch(url, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ prompt }),
+        ...(body ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}),
         signal: abort.signal,
       })
       if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
@@ -98,6 +112,20 @@ export default function App() {
             <li key={i}>{label}</li>
           ))}
         </ul>
+      )}
+
+      {chat.approval && (
+        <div className="approval" role="group" aria-label="Schválení zápisu">
+          <p>Agent chce zapsat: <strong>{chat.approval.label}</strong></p>
+          <div className="actions">
+            <button type="button" onClick={() => void decide('approve')} disabled={streaming}>
+              Schválit
+            </button>
+            <button type="button" onClick={() => void decide('decline')} disabled={streaming}>
+              Zamítnout
+            </button>
+          </div>
+        </div>
       )}
 
       <section className="answer" aria-live="polite">

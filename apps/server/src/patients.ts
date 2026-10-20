@@ -17,6 +17,11 @@ export function findPatients(query: string): Patient[] {
   return PATIENTS.filter((p) => normalize(p.name).includes(q));
 }
 
+/** Krok 10: pacient podle id z get_patient (book_appointment dostane id, ne jméno). */
+export function getPatient(id: string): Patient | undefined {
+  return PATIENTS.find((p) => p.id === id);
+}
+
 // „Dvořáková“ → „dvorakova“: NFD rozdělí á na a + čárku, čárky (U+0300–U+036F) pak smažeme
 function normalize(text: string): string {
   return text.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
